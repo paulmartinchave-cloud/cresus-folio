@@ -1,0 +1,30 @@
+# Ajoute chaque mois les prix TCGplayer des produits scellés Pokémon à data/historique-pokemon.json
+# (le premier lancement récupère tout l'historique depuis février 2024).
+name: Historique des prix Pokémon
+
+on:
+  schedule:
+    - cron: '23 7 2 * *'   # le 2 de chaque mois, 7 h 23 UTC
+  workflow_dispatch: {}     # bouton « Run workflow » pour le lancer à la main
+
+permissions:
+  contents: write
+
+jobs:
+  historique:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install py7zr==1.1.4 requests==2.32.3
+      - run: python scripts/historique_pokemon.py
+      - name: Enregistrer le fichier mis à jour
+        run: |
+          git config user.name "cresus-folio-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/historique-pokemon.json
+          git diff --cached --quiet || git commit -m "Historique Pokémon : mise à jour du $(date -u +%Y-%m-%d)"
+          git push
