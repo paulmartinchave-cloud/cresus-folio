@@ -6,7 +6,7 @@ Le script prend une archive par mois (le 1er, ou le premier jour disponible), n'
 Pokémon (catégorie 3, sans numéro ni rareté de carte) et écrit data/historique-pokemon.json :
   { "v": 1, "maj": "AAAA-MM-JJ", "dates": ["2024-02-08", "2024-03-01", ...], "p": { "<productId>": [prix ou null, ...] } }
 Il ne télécharge que les mois manquants : on peut le relancer sans risque (tâche mensuelle GitHub).
-Les prix d'avant la sortie d'un produit (précommandes, souvent très gonflées) sont écartés : seule compte la date
+Les prix d'avant la sortie d'un produit (précommandes, souvent très gonflées) sont écartés par le site, à l'affichage : seule compte la date
 de sortie du produit (presaleInfo.releasedOn de TCGplayer, sinon celle de son extension), notée dans "sortie".
 Pour que la courbe parte bien du jour de sortie (et pas du 1er du mois suivant), le prix de ce jour-là est ajouté
 dans "lancement" : { "<productId>": ["AAAA-MM-JJ", prix] } (une archive par date de sortie, téléchargée une seule fois).
@@ -32,6 +32,10 @@ BASE = 'https://tcgcsv.com'
 CATEGORIE = 3  # Pokémon
 DEBUT = dt.date(2024, 2, 8)  # première archive existante
 SORTIE = os.path.join(os.path.dirname(__file__), '..', 'data', 'historique-pokemon.json')
+# Version du 21/11/2026, avant qu'une date de sortie erronée (2026-11-21 sur des produits anciens) n'efface ~400 historiques :
+# reprise une seule fois pour reconstituer les relevés effacés (voir main)
+REPRISE = ('https://raw.githubusercontent.com/paulmartinchave-cloud/cresus-folio/'
+           'b69150440cc831e82a02703e1ac59dc3a7f88d7d/data/historique-pokemon.json')
 UA = {'User-Agent': 'CresusFolio-historique/1.0 (+https://cresusfolio.web.app)'}
 
 
@@ -198,9 +202,10 @@ def prix_magasin(nom, html, sortie):
 
 def produits_scelles():
     """Produits scellés Pokémon du catalogue actuel de TCGCSV :
-    ({id: date de sortie 'AAAA-MM-JJ', ou '' si en précommande}, {id: prix magasin estimé})."""
+    ({id: date de sortie 'AAAA-MM-JJ', ou '' si en précommande}, {id: prix magasin estimé},
+     {id: groupe dont vient la date, quand le produit n'a pas sa propre date de sortie})."""
     groupes = get(f'{BASE}/tcgplayer/{CATEGORIE}/groups').json()['results']
-    ids, magasin = {}, {}
+    ids, magasin, groupe = {}, {}, {}
     for g in groupes:
         sortie_ext = (g.get('publishedOn') or '')[:10]
         r = get(f"{BASE}/tcgplayer/{CATEGORIE}/{g['groupId']}/products")
@@ -216,13 +221,15 @@ def produits_scelles():
             pre = p.get('presaleInfo') or {}
             pid = str(p['productId'])
             ids[pid] = '' if pre.get('isPresale') else ((pre.get('releasedOn') or '')[:10] or sortie_ext)
+            if ids[pid] and not (pre.get('releasedOn') or '')[:10]:
+                groupe[pid] = g['groupId']
             if ids[pid] >= DEBUT.isoformat():
                 texte = next((e.get('value') or '' for e in ext if (e.get('name') or '') == 'CardText'), '')
                 v = prix_magasin(nom, texte, ids[pid])
                 if v:
                     magasin[pid] = v
         time.sleep(0.05)
-    return ids, magasin
+    return ids, magasin, groupe
 
 
 def dates_voulues(aujourdhui):
@@ -280,9 +287,23 @@ def main():
     if os.path.exists(SORTIE):
         with open(SORTIE, encoding='utf-8') as f:
             H = json.load(f)
+    if not H.get('reprise'):
+        r = get(REPRISE)
+        if r:
+            A, idx, n = r.json(), {d: i for i, d in enumerate(H['dates'])}, len(H['dates'])
+            repris = 0
+            for pid, liste in A.get('p', {}).items():
+                cible = H['p'].setdefault(pid, [None] * n)
+                for d, v in zip(A.get('dates', []), liste):
+                    i = idx.get(d)
+                    if v and i is not None and i < len(cible) and not cible[i]:
+                        cible[i] = v
+                        repris += 1
+            H['reprise'] = 1
+            print(f'Reprise des relevés effacés : {repris} prix')
     deja = {d[:7] for d in H['dates']}
     manquantes = [j for j in dates_voulues(aujourdhui) if j.isoformat()[:7] not in deja]
-    scelles, magasin = produits_scelles()
+    scelles, magasin, groupe = produits_scelles()
     print(f'{len(scelles)} produits scellés Pokémon ; mois à ajouter : {[j.isoformat()[:7] for j in manquantes]}')
     for jour in manquantes:
         date, P = prix_archive(jour, scelles)
@@ -301,14 +322,26 @@ def main():
     ordre = sorted(range(len(H['dates'])), key=lambda i: H['dates'][i])
     H['dates'] = [H['dates'][i] for i in ordre]
     H['p'] = {pid: [l[i] if i < len(l) else None for i in ordre] for pid, l in H['p'].items()}
-    # rien avant la sortie : les prix de précommande faussent l'évolution
-    # (les produits sortis depuis le dernier relevé mensuel sont gardés aussi : date de sortie, prix du jour de sortie, prix magasin)
+    # Date de sortie de chaque produit. Les relevés ne sont jamais effacés : c'est le site qui écarte, à l'affichage,
+    # les prix d'avant la sortie (précommandes). Une date de sortie postérieure de plus de 6 mois aux premiers prix relevés
+    # est fausse (TCGplayer date parfois d'un coup des groupes entiers de vieux produits) : elle est ignorée, et avec elle
+    # la date de tout le groupe d'où elle vient (dès 3 produits concernés) pour les produits qui n'ont pas leur propre date.
+    # Les produits sortis depuis le dernier relevé mensuel sont gardés aussi (date de sortie, prix du jour de sortie, prix magasin).
     recents = {pid for pid, s in scelles.items() if s and DEBUT.isoformat() <= s <= aujourdhui.isoformat()}
-    H['sortie'] = {pid: scelles[pid] for pid in set(H['p']) | recents if pid in scelles}
-    for pid, liste in H['p'].items():
-        s = H['sortie'].get(pid)
-        if s is not None:
-            H['p'][pid] = [v if (s and d >= s) else None for d, v in zip(H['dates'], liste)]
+    fausses = set()
+    for pid in set(H['p']) | recents:
+        s = scelles.get(pid)
+        premier = next((d for d, v in zip(H['dates'], H['p'].get(pid, [])) if v), None)
+        if s and premier and dt.date.fromisoformat(premier[:10]) < dt.date.fromisoformat(s) - dt.timedelta(days=183):
+            fausses.add(pid)
+    n_groupe = {}
+    for pid in fausses:
+        if pid in groupe:
+            n_groupe[groupe[pid]] = n_groupe.get(groupe[pid], 0) + 1
+    groupes_faux = {g for g, n in n_groupe.items() if n >= 3}
+    H['sortie'] = {pid: scelles[pid] for pid in set(H['p']) | recents
+                   if pid in scelles and pid not in fausses and groupe.get(pid) not in groupes_faux}
+    print(f'{len(fausses)} dates de sortie ignorées (bien après les premiers prix), {len(groupes_faux)} groupe(s) mal daté(s)')
     H['p'] = {pid: l for pid, l in H['p'].items() if any(l)}
     # prix le jour de la sortie, pour les produits sortis depuis le début des archives
     L = H.get('lancement') or {}
