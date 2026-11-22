@@ -8,6 +8,8 @@ Pokémon (catégorie 3, sans numéro ni rareté de carte) et écrit data/histori
 Il ne télécharge que les mois manquants : on peut le relancer sans risque (tâche mensuelle GitHub).
 Les prix d'avant la sortie d'un produit (précommandes, souvent très gonflées) sont écartés : seule compte la date
 de sortie du produit (presaleInfo.releasedOn de TCGplayer, sinon celle de son extension), notée dans "sortie".
+Pour que la courbe parte bien du jour de sortie (et pas du 1er du mois suivant), le prix de ce jour-là est ajouté
+dans "lancement" : { "<productId>": ["AAAA-MM-JJ", prix] } (une archive par date de sortie, téléchargée une seule fois).
 """
 import datetime as dt
 import json
@@ -146,6 +148,21 @@ def main():
         if s is not None:
             H['p'][pid] = [v if (s and d >= s) else None for d, v in zip(H['dates'], liste)]
     H['p'] = {pid: l for pid, l in H['p'].items() if any(l)}
+    # prix le jour de la sortie, pour les produits sortis depuis le début des archives
+    L = H.get('lancement') or {}
+    L = {pid: v for pid, v in L.items() if pid in H['p'] and H['sortie'].get(pid) and v and v[0] >= H['sortie'][pid]}
+    a_faire = {}
+    for pid in H['p']:
+        s = H['sortie'].get(pid)
+        if s and s >= DEBUT.isoformat() and s not in H['dates'] and pid not in L:
+            a_faire.setdefault(s, set()).add(pid)
+    print(f'{len(a_faire)} dates de sortie à relever')
+    for s, ids in sorted(a_faire.items()):
+        date, P = prix_archive(dt.date.fromisoformat(s), ids)
+        for pid in ids:
+            if date and pid in P:
+                L[pid] = [date, P[pid]]
+    H['lancement'] = L
     H['maj'] = aujourdhui.isoformat()
     os.makedirs(os.path.dirname(SORTIE), exist_ok=True)
     with open(SORTIE, 'w', encoding='utf-8') as f:
