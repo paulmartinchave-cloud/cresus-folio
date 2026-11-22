@@ -12,6 +12,7 @@ Pour que la courbe parte bien du jour de sortie (et pas du 1er du mois suivant),
 dans "lancement" : { "<productId>": ["AAAA-MM-JJ", prix] } (une archive par date de sortie, téléchargée une seule fois).
 "magasin" : { "<productId>": prix } donne le prix en magasin estimé en France (€) des produits sortis depuis février 2024,
 d'après le type de produit et le nombre de boosters indiqué dans sa description : la courbe du site part de ce prix.
+"dernier" : ["AAAA-MM-JJ", { "<productId>": prix }] donne le prix le plus récent (archive de la veille), pour avoir un point frais.
 """
 import datetime as dt
 import json
@@ -234,9 +235,9 @@ def dates_voulues(aujourdhui):
     return D
 
 
-def prix_archive(jour, scelles):
+def prix_archive(jour, scelles, jours=6):
     """Télécharge l'archive d'un jour (ou des jours suivants si elle manque) et renvoie (date réelle, {id: prix})."""
-    for decalage in range(6):
+    for decalage in range(jours):
         d = jour + dt.timedelta(days=decalage)
         if d > dt.date.today():
             return None, {}
@@ -301,7 +302,9 @@ def main():
     H['dates'] = [H['dates'][i] for i in ordre]
     H['p'] = {pid: [l[i] if i < len(l) else None for i in ordre] for pid, l in H['p'].items()}
     # rien avant la sortie : les prix de précommande faussent l'évolution
-    H['sortie'] = {pid: scelles[pid] for pid in H['p'] if pid in scelles}
+    # (les produits sortis depuis le dernier relevé mensuel sont gardés aussi : date de sortie, prix du jour de sortie, prix magasin)
+    recents = {pid for pid, s in scelles.items() if s and DEBUT.isoformat() <= s <= aujourdhui.isoformat()}
+    H['sortie'] = {pid: scelles[pid] for pid in set(H['p']) | recents if pid in scelles}
     for pid, liste in H['p'].items():
         s = H['sortie'].get(pid)
         if s is not None:
@@ -309,9 +312,9 @@ def main():
     H['p'] = {pid: l for pid, l in H['p'].items() if any(l)}
     # prix le jour de la sortie, pour les produits sortis depuis le début des archives
     L = H.get('lancement') or {}
-    L = {pid: v for pid, v in L.items() if pid in H['p'] and H['sortie'].get(pid) and v and v[0] >= H['sortie'][pid]}
+    L = {pid: v for pid, v in L.items() if pid in H['sortie'] and H['sortie'].get(pid) and v and v[0] >= H['sortie'][pid]}
     a_faire = {}
-    for pid in H['p']:
+    for pid in H['sortie']:
         s = H['sortie'].get(pid)
         if s and s >= DEBUT.isoformat() and s not in H['dates'] and pid not in L:
             a_faire.setdefault(s, set()).add(pid)
@@ -323,7 +326,14 @@ def main():
                 L[pid] = [date, P[pid]]
     H['lancement'] = L
     # prix en magasin à la sortie (estimé), point de départ de la courbe sur le site
-    H['magasin'] = {pid: v for pid, v in magasin.items() if pid in H['p']}
+    H['magasin'] = {pid: v for pid, v in magasin.items() if pid in H['sortie']}
+    # dernier prix connu (archive la plus récente) : point le plus frais de chaque courbe, entre deux relevés mensuels
+    for k in range(1, 6):
+        date, P = prix_archive(aujourdhui - dt.timedelta(days=k), set(H['sortie']) | set(H['p']), jours=1)
+        if date:
+            H['dernier'] = [date, P]
+            print(f'Dernier relevé : {date} ({len(P)} prix)')
+            break
     H['maj'] = aujourdhui.isoformat()
     os.makedirs(os.path.dirname(SORTIE), exist_ok=True)
     with open(SORTIE, 'w', encoding='utf-8') as f:
