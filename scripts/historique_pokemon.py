@@ -6,6 +6,8 @@ Le script prend une archive par mois (le 1er, ou le premier jour disponible), n'
 Pokémon (catégorie 3, sans numéro ni rareté de carte) et écrit data/historique-pokemon.json :
   { "v": 1, "maj": "AAAA-MM-JJ", "dates": ["2024-02-08", "2024-03-01", ...], "p": { "<productId>": [prix ou null, ...] } }
 Il ne télécharge que les mois manquants : on peut le relancer sans risque (tâche mensuelle GitHub).
+Les prix d'avant la sortie d'un produit (précommandes, souvent très gonflées) sont écartés : seule compte la date
+de sortie du produit (presaleInfo.releasedOn de TCGplayer, sinon celle de son extension), notée dans "sortie".
 """
 import datetime as dt
 import json
@@ -40,10 +42,11 @@ def get(url, **kw):
 
 
 def produits_scelles():
-    """Identifiants des produits scellés Pokémon d'après le catalogue actuel de TCGCSV."""
+    """Produits scellés Pokémon du catalogue actuel de TCGCSV : {id: date de sortie 'AAAA-MM-JJ', ou '' si en précommande}."""
     groupes = get(f'{BASE}/tcgplayer/{CATEGORIE}/groups').json()['results']
-    ids = set()
+    ids = {}
     for g in groupes:
+        sortie_ext = (g.get('publishedOn') or '')[:10]
         r = get(f"{BASE}/tcgplayer/{CATEGORIE}/{g['groupId']}/products")
         if not r:
             continue
@@ -54,7 +57,8 @@ def produits_scelles():
                 continue  # carte à l'unité
             if 'code card' in nom.lower() or 'online code' in nom.lower():
                 continue
-            ids.add(str(p['productId']))
+            pre = p.get('presaleInfo') or {}
+            ids[str(p['productId'])] = '' if pre.get('isPresale') else ((pre.get('releasedOn') or '')[:10] or sortie_ext)
         time.sleep(0.05)
     return ids
 
@@ -116,9 +120,6 @@ def main():
             H = json.load(f)
     deja = {d[:7] for d in H['dates']}
     manquantes = [j for j in dates_voulues(aujourdhui) if j.isoformat()[:7] not in deja]
-    if not manquantes:
-        print('Historique déjà à jour.')
-        return 0
     scelles = produits_scelles()
     print(f'{len(scelles)} produits scellés Pokémon ; mois à ajouter : {[j.isoformat()[:7] for j in manquantes]}')
     for jour in manquantes:
@@ -138,6 +139,13 @@ def main():
     ordre = sorted(range(len(H['dates'])), key=lambda i: H['dates'][i])
     H['dates'] = [H['dates'][i] for i in ordre]
     H['p'] = {pid: [l[i] if i < len(l) else None for i in ordre] for pid, l in H['p'].items()}
+    # rien avant la sortie : les prix de précommande faussent l'évolution
+    H['sortie'] = {pid: scelles[pid] for pid in H['p'] if pid in scelles}
+    for pid, liste in H['p'].items():
+        s = H['sortie'].get(pid)
+        if s is not None:
+            H['p'][pid] = [v if (s and d >= s) else None for d, v in zip(H['dates'], liste)]
+    H['p'] = {pid: l for pid, l in H['p'].items() if any(l)}
     H['maj'] = aujourdhui.isoformat()
     os.makedirs(os.path.dirname(SORTIE), exist_ok=True)
     with open(SORTIE, 'w', encoding='utf-8') as f:
